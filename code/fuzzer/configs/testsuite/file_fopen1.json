@@ -1,5 +1,5 @@
 {
-    "target": "http://web/file_fnmatch1.php",
+    "target": "http://web/file_fopen1.php",
     "methods": [
         "GET"
     ],
