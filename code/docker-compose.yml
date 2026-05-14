@@ -52,10 +52,14 @@ services:
     ports:
       - 8080:80
       - 8181:8181
-
+ 
   db:
     image: mysql
-    command: mysqld
+    command: 
+      - mysqld
+      - --general-log=1
+      - --general-log-file=/shared-tmpfs/mysql_general.log
+      - --log-output=FILE
     environment:
       MYSQL_DATABASE: db
       MYSQL_USER: user
@@ -63,6 +67,9 @@ services:
       MYSQL_ROOT_PASSWORD: password
       MYSQL_ROOT_HOST: "%"
       MYSQL_USER_HOST: "%"
+    volumes:
+      - shared-tmpfs:/shared-tmpfs
+      - ./init_phuzz_sensors.sql:/docker-entrypoint-initdb.d/init_phuzz_sensors.sql
 
   burpsuite:
     build:

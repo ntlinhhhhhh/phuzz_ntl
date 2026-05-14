@@ -206,6 +206,41 @@ class SuperRandomMutator(ParamMutator):
 
         return mutated_string
 
+class SQLiSideEffectMutator(ParamMutator):
+    def __init__(self):
+        self.payloads = [
+            # "'; INSERT INTO phuzz_sensors.__phuzz_sensor_insert (p_marker, p_instance) VALUES ('{MARKER}', '{INSTANCE_ID}'); -- ",
+            # "'; UPDATE phuzz_sensors.__phuzz_sensor_update SET canary_value = '{MARKER}' WHERE id = 1; -- ",
+            "' OR (SELECT 1 FROM phuzz_sensors.__phuzz_sensor_insert WHERE p_marker='{MARKER}') -- ",
+            "' AND (SELECT 1 FROM phuzz_sensors.__phuzz_sensor_insert WHERE p_marker='{MARKER}') -- ",
+            "' AND '{MARKER}' = '__phuzz_sensor_insert' -- "
+        ]
+
+    def mutate(self, string):
+            payload = random.choice(self.payloads)
+            
+            random_salt = str(random.randint(10000, 999999))
+            payload = payload + random_salt
+
+            if len(string) == 0:
+                return payload
+            index = random.randint(0, len(string))
+            return string[:index] + payload + string[index:]
+
+
+class TimeBasedSQLiMutator(ParamMutator):
+    def __init__(self):
+        self.payloads = [
+            "' AND (SELECT 1 FROM (SELECT SLEEP(3))as x) -- ",
+            "' OR (SELECT 1 FROM (SELECT SLEEP(3))as x) -- "
+        ]
+
+    def mutate(self, string):
+        payload = random.choice(self.payloads)
+        if len(string) == 0:
+            return payload
+        index = random.randint(0, len(string))
+        return string[:index] + payload + string[index:]
 
 #######
 #
@@ -249,19 +284,21 @@ class SingleMutator(Mutator):
     def __init__(self):
         super(Mutator, self).__init__()
         self.param_mutators = [
-            IterateCharParamMutator(),
-            AddCharParamMutator(),
-            EquallyRandomCharParamMutator(),
-            FiftyFiftyCharParamMutator(),
-            NumberParamMutator(),
-            StringParamMutator(),
-            DigitExtensionParamMutator(),
-            CharExtensionParamMutator(),
-            SwapCharParamMutator(),
-            XSSPayloadParamMutator(),
-            PathTraversalPayloadParamMutator(),
-            #ProtocolPrefixMutator(),
-            SuperRandomMutator()
+            SQLiSideEffectMutator(), #tlinh
+            # TimeBasedSQLiMutator(), #tlinh
+            # IterateCharParamMutator(),
+            # AddCharParamMutator(),
+            # EquallyRandomCharParamMutator(),
+            # FiftyFiftyCharParamMutator(),
+            # NumberParamMutator(),
+            # StringParamMutator(),
+            # DigitExtensionParamMutator(),
+            # CharExtensionParamMutator(),
+            # SwapCharParamMutator(),
+            # XSSPayloadParamMutator(),
+            # PathTraversalPayloadParamMutator(),
+            # #ProtocolPrefixMutator(),
+            # SuperRandomMutator()
         ]
 
         self.iterator = self.mutation_iterator()

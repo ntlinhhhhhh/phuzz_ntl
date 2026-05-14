@@ -5,4 +5,5 @@ WORKDIR /app/
 COPY requirements.txt /tmp/
 RUN pip install --no-cache-dir -r /tmp/requirements.txt
 RUN rm /sync-tmpfs/vuln_found || true
+RUN pip install sqlglot
 ENTRYPOINT python /app/fuzzer.py

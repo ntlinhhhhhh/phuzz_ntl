@@ -25,6 +25,7 @@ from mutator import DefaultMutator, EmptyQueueMutator, SingleMutator
 from scoring import DefaultScoringFormula
 from vulncheck import DefaultVulnChecker, ParamBasedVulnChecker
 from utils import fuzz_open
+from oracle import SideEffectOracle
 
 #def print(*args, **kwargs):
 #    pass
@@ -83,27 +84,41 @@ class Fuzzer:
         self.xxe_errors_folder = os.path.join(
             "/shared-tmpfs/", "xxe-error-reports")
         self.output_dir = os.path.join("./output", f"fuzzer-{fuzzer_id}")
-        if os.path.exists(self.output_dir):
-            shutil.rmtree(self.output_dir)
-        os.mkdir(self.output_dir)
+        # if os.path.exists(self.output_dir):
+        #     shutil.rmtree(self.output_dir)
+        # os.mkdir(self.output_dir)
 
-        ### 
-        # BEGIN Define Fuzzing modules
-        ####
+        if not os.path.exists(self.output_dir):
+            os.mkdir(self.output_dir)
+
+        ### Define Fuzzer-wide modules
         self.scoring_formula = DefaultScoringFormula()
-        self.mutator = DefaultMutator()
-        #self.vulnchecker = DefaultVulnChecker(
-        self.vulnchecker = ParamBasedVulnChecker(
-            mysql_errors_folder=self.mysql_errors_folder,
-            shell_errors_folder=self.shell_errors_folder,
-            unserialize_errors_folder=self.unserialize_errors_folder,
-            pathtraversal_errors_folder=self.pathtraversal_errors_folder,
-            xxe_errors_folder=self.xxe_errors_folder,
-            )
-        ### 
-        # END Define Fuzzing modules
-        ####
+        
+        # Chỉ dùng SingleMutator để tập trung tìm Blind SQLi
+        self.single_mutator = SingleMutator() 
+        self.mutator = self.single_mutator 
+        
+        # Dùng DefaultVulnChecker để tránh lỗi thiếu file web-paths.txt
+        self.vulnchecker = DefaultVulnChecker() 
+        
+        ### SideEffectOracle khởi tạo sau cùng
+        self.db_oracle = SideEffectOracle() 
+        
         os.umask(0)
+
+        
+        # self.vulnchecker = ParamBasedVulnChecker(
+        #     mysql_errors_folder=self.mysql_errors_folder,
+        #     shell_errors_folder=self.shell_errors_folder,
+        #     unserialize_errors_folder=self.unserialize_errors_folder,
+        #     pathtraversal_errors_folder=self.pathtraversal_errors_folder,
+        #     xxe_errors_folder=self.xxe_errors_folder,
+        #     )
+        
+        # ### change here to use the SideEffectOracle - tlinh
+        # self.db_oracle = SideEffectOracle()
+        # ###
+        # os.umask(0)
 
     def _open(self, filepath):
         return os.open(filepath, os.O_CREAT | os.O_WRONLY | os.O_TRUNC, 0o777)
@@ -419,6 +434,10 @@ class Fuzzer:
 
         if os.path.exists(coverage_file_path):
             os.unlink(coverage_file_path)
+        
+        ### Cleanup side effects in the database for the next run - tlinh
+        self.db_oracle.cleanup()
+        ###
 
     def check_for_exception_or_error(self, candidate):
         exception_file = os.path.join(
@@ -455,18 +474,23 @@ class Fuzzer:
         query = dict(urlparse.parse_qsl(url_parts[4]))
         url_parts[4] = '' # reset query string, which we will set using params={...}
 
-        the_params = {**query, **candidate.fuzz_params['query_params'], **candidate.fixed_params['query_params']}
-        the_body_params = {**candidate.fuzz_params['body_params'], **candidate.fixed_params['body_params']}
-        the_cookies = {**candidate.fuzz_params['cookies'], **candidate.fixed_params['cookies']} # self._urlencode_dict()
-        the_headers = {**candidate.fuzz_params['headers'], **candidate.fixed_params['headers']}
-        the_headers["X-FUZZER-COVID"] = candidate.coverage_id
+        marker = candidate.coverage_id
+        instance_id = str(candidate.fuzzer_id)
 
-        # print({
-        #     'query': the_params,
-        #     'cookies': the_cookies,
-        #     'headers': the_headers,
-        #     'body': the_body_params    
-        #     })
+        def resolve_markers(val):
+            if isinstance(val, str):
+                return val.replace("{MARKER}", marker).replace("{INSTANCE_ID}", instance_id)
+            if isinstance(val, dict):
+                return {k: resolve_markers(v) for k, v in val.items()}
+            if isinstance(val, list):
+                return [resolve_markers(v) for v in val]
+            return val
+
+        the_params = {**query, **resolve_markers(candidate.fuzz_params['query_params']), **resolve_markers(candidate.fixed_params['query_params'])}
+        the_body_params = {**resolve_markers(candidate.fuzz_params['body_params']), **resolve_markers(candidate.fixed_params['body_params'])}
+        the_cookies = {**resolve_markers(candidate.fuzz_params['cookies']), **resolve_markers(candidate.fixed_params['cookies'])} 
+        the_headers = {**resolve_markers(candidate.fuzz_params['headers']), **resolve_markers(candidate.fixed_params['headers'])}
+        the_headers["X-FUZZER-COVID"] = candidate.coverage_id
 
         if candidate.http_method in ["GET", "OPTIONS", "TRACE"]:
             req = requests.Request(method=candidate.http_method, 
@@ -521,7 +545,7 @@ class Fuzzer:
 
     def ff_mutate(self, c):
 
-        mutator = SingleMutator()
+        mutator = self.single_mutator
 
         choice_keys = list(filter(lambda x: c.fuzz_params[x], c.fuzz_params))
         choice_weights = list(map(lambda x: c.fuzz_weights[x], choice_keys))
@@ -550,19 +574,44 @@ class Fuzzer:
 
         return new_candidate
 
+    ### send request and check vulns with oracle - tlinh
     def ff_send_request(self, c):
         try:
             with requests.Session() as s:
-                #print(f'Testing candidate: {c.priority} {c.fuzz_params}')  
                 prepared_req = self.prepare_request(c)
+                
+                # Bắt đầu đo thời gian
+                start_time = time.time()
                 response = s.send(prepared_req, timeout=self.request_timeout, allow_redirects=False)
+                end_time = time.time()
+                
                 c.response = response
+                # Lưu lại thời gian phản hồi vào candidate
+                c.response_time = end_time - start_time 
+                
         except Exception as e:
-            print(f"Exception encountered: {e}")
+            # Nếu timeout (do sleep quá lâu vượt request_timeout), cũng có thể là dấu hiệu
+            c.response_time = self.request_timeout
+            print(f"Exception encountered: {e}", flush=True)
             c.response = None
 
+
+
+
     def ff_has_vulns(self, c):
-        vulns = self.vulnchecker.vuln_check(c)
+        vulns = []
+        # vulns = self.vulnchecker.vuln_check(c)
+
+        import time
+        time.sleep(0.1)
+        oracle_result = self.db_oracle.check_side_effects(c.coverage_id)
+        if oracle_result:
+            vulns.append(f"Blind_SQLi_SideEffect_via_{oracle_result}")
+
+        ### Check for Time-based Blind SQLi
+        if hasattr(c, 'response_time') and c.response_time >= 3.0:
+            vulns.append("TimeBased_Blind_SQLi") #
+
         if any(vulns):
             for k in vulns:
                 if self.config['print_timestamps']:
